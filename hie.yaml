@@ -1,0 +1,12 @@
+cradle:
+  cabal:
+    - path: "./src"
+      component: "lib:icmpecho"
+    - path: "./tests/doctests.hs"
+      component: "icmpecho:doctests"
+    - path: "./tests"
+      component: "icmpecho:test-library"
+    - path: "./bin/Clashi.hs"
+      component: "icmpecho:exe:clashi"
+    - path: "./bin/Clash.hs"
+      component: "icmpecho:exe:clash"
