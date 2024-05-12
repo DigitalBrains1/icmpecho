@@ -316,30 +316,6 @@ cntInit = 6
  - `asyncRamPow2` with separate enable lines for the read path and the write
  - path.
  -}
-responderStream
-    :: HiddenClockResetEnable dom
-    => "sIn" :::
-           Signal dom
-               ( Maybe ( "more" ::: Bool
-                       , "data" ::: Unsigned 8
-                       )
-               )
-       -- ^ Stream-in
-    -> "sOutReady" ::: Signal dom Bool
-       -- ^ Stream-out ready
-    -> ( "sInReady" ::: Signal dom Bool
-         -- ^ Stream-in ready
-       , "sOut" :::
-           Signal dom
-               ( Maybe ( "more" ::: Bool
-                       , "data" ::: Unsigned 8
-                       )
-               )
-         -- ^ Stream-out
-       )
-
-responderStream = hideClockResetEnable responderStream'
-
 responderStream'
     :: KnownDomain dom
     => Clock dom
@@ -377,4 +353,4 @@ responderStream' clk rst en sIn sOutReady = (sInReady, sOut)
 
         readData' = CEP.register clk rst sOutEn 0 readData
         readAddr' = CEP.register clk rst sOutEn 0 readAddr
-        sOutEn = CEP.enable en sOutReady
+        sOutEn = CEP.andEnable en sOutReady

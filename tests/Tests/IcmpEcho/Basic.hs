@@ -14,10 +14,34 @@ import Test.Tasty.Hedgehog
 
 import IcmpEcho
 
+import Tests.IcmpEcho.PacketFifo (responderStream')
+
+import qualified Data.List as L
 import qualified Clash.Prelude as C
+import qualified Clash.Explicit.Prelude as E
+
 import qualified Hedgehog as H
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
+
+runPacketFifo ::
+  [ ( [C.Unsigned 8]
+    , Int
+    )
+  ] ->
+  ([Bool], [Maybe (Bool, C.Unsigned 8)])
+runPacketFifo [] = ([], [])
+runPacketFifo ((inPkt, stall) : _) = (inReady1, streamOut1)
+ where
+  streamIn =
+    C.fromList $ (map (Just . (True,)) $ init inPkt) ++
+    [Just (False, last inPkt)] ++ L.repeat Nothing
+
+  (inReady, streamOut) = responderStream' C.systemClockGen E.noReset C.enableGen streamIn (pure True)
+  inReady1 = C.sample inReady
+  streamOut1 = C.sample streamOut
+
+--   42 in -> 45 uit
 
 data AlterPacket
   = AlterMac
@@ -65,15 +89,20 @@ genPacket alter = do
   srcMac <- replicateM 6 $ genUnsigned Range.constantBounded
   random2 <- replicateM 8 $ genUnsigned Range.constantBounded
   srcIp <- replicateM 4 $ genUnsigned Range.constantBounded
-  extraLen <- Gen.integral (Range.constant 0 64)
-  random4 <- replicateM (extraLen + 7) $ genUnsigned Range.constantBounded
+  random3 <- replicateM 2 $ genUnsigned Range.constantBounded
+  random4 <- genUnsigned Range.constantBounded
+  extraLen <- Gen.integral (Range.linear 0 64)
+  random5 <- replicateM (extraLen + 4) $ genUnsigned Range.constantBounded
   let
-    request cksum = destMac1 ++ srcMac ++ l2proto1 ++ random2 ++ [l3proto1] ++ cksum ++
-      srcIp ++ ipType1 ++ random4
-    request1 = request $ u16toU8s $ checksumPacket $ request [0,0]
+    request cksum =
+      destMac1 ++ srcMac ++ l2proto1 ++ random2 ++ [l3proto1] ++ random3 ++
+      srcIp ++ ipType1 ++ [random4] ++ cksum ++ random5
+    request1 = request $ u16toU8s $ checksumIcmp $ request [0,0]
     reply cksum =
-      srcMac ++ destMac ++ l2proto ++ random2 ++ [l3proto] ++ cksum ++ take 4 ipType ++ srcIp ++ [0x01] ++ random4
-    reply1 = reply $ u16toU8s $ checksumPacket $ reply [0,0]
+      srcMac ++ destMac ++ l2proto ++ random2 ++ [l3proto] ++ random3 ++
+      take 4 ipType ++ srcIp ++ [0x00] ++ [random4] ++ cksum ++ random5
+
+    reply1 = reply $ u16toU8s $ checksumIcmp $ reply [0,0]
     reply2
       | destMac1 == destMac
       , l2proto1 == l2proto
@@ -93,10 +122,11 @@ genPacket alter = do
     in xs1 ++ (byte:tail xs2)
 
 
-checksumPacket ::
+checksumIcmp ::
   [C.Unsigned 8] ->
   C.Unsigned 16
-checksumPacket xs = complement $ foldl' (~+~) 0 $ map to16 $ parts $ take 20 $ drop 14 xs
+checksumIcmp xs =
+  complement $ foldl' (~+~) 0 $ map to16 $ parts $ take 8 $ drop 34 xs
  where
   parts []  = []
   parts xs1 = let (xs2, xs3) = splitAt 2 xs1 in xs2:parts xs3
@@ -116,22 +146,26 @@ pPrintPacket ::
   [C.Unsigned 8] ->
   String
 pPrintPacket packet =
-  ("MAC: " ++) . showHexList mac . ("\nEtherType: " ++) .
+  ("Src MAC: " ++) . showHexList srcMac .
+  ("\nDst MAC: " ++) . showHexList dstMac . ("\nEtherType: " ++) .
   showHexList etherType .
   ("\nIP ver/len: " ++) . showHex8 verLen . ("\nL3 proto: " ++) . showHex8 l3Proto .
-  ("\nDest IP: " ++) . showHexList destIp . ("\nICMP Type: " ++) . showHex8 icmpType .
+  ("\nSrc IP: " ++) . showHexList srcIp .
+  ("\nDst IP: " ++) . showHexList destIp . ("\nICMP Type: " ++) . showHex8 icmpType .
   ("\nPayload length: " ++) . shows payLen . ("\nComputed checksum: " ++) . showHex16 checksum . ("\nHex dump:\n" ++) $ showDump packet ""
  where
-  (mac, packet1) = splitAt 6 packet
-  (etherType, packet2) = splitAt 2 $ drop 6 packet1
-  verLen = head packet2
-  packet3 = drop 9 packet2
-  l3Proto = head packet3
-  packet4 = tail packet3
-  (destIp, packet5) = splitAt 4 $ drop 6 packet4
-  icmpType = head packet5
-  payLen = length packet5 - 8
-  checksum = checksumPacket packet
+  (dstMac, packet1) = splitAt 6 packet
+  (srcMac, packet2) = splitAt 6 packet1
+  (etherType, packet3) = splitAt 2 packet2
+  verLen = head packet3
+  packet4 = drop 9 packet3
+  l3Proto = head packet4
+  packet5 = tail packet4
+  (srcIp, packet6) = splitAt 4 $ drop 2 packet5
+  (destIp, packet7) = splitAt 4 packet6
+  icmpType = head packet7
+  payLen = length packet7 - 8
+  checksum = checksumIcmp packet
 
   showHexAlign p n =
     let cs = showHex n ""
