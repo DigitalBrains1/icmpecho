@@ -1,15 +1,17 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module Tests.IcmpEcho.Basic where
 
-import Control.Monad.Extra (replicateM)
+import Control.Monad.Extra (mapAndUnzipM, replicateM)
 import Data.Bits (complement)
 import Data.List (foldl', intersperse)
+import Data.Maybe (isJust, fromJust)
 import Numeric (showHex)
 import Prelude
 
 import Clash.Hedgehog.Sized.Index
 import Clash.Hedgehog.Sized.Unsigned
 import Test.Tasty
-import Test.Tasty.TH
 import Test.Tasty.Hedgehog
 
 import IcmpEcho
@@ -24,24 +26,45 @@ import qualified Hedgehog as H
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
 
-runPacketFifo ::
-  [ ( [C.Unsigned 8]
-    , Int
-    )
-  ] ->
-  ([Bool], [Maybe (Bool, C.Unsigned 8)])
-runPacketFifo [] = ([], [])
-runPacketFifo ((inPkt, stall) : _) = (inReady1, streamOut1)
+tests :: TestTree
+tests =
+  testGroup "PacketFifo"
+    [ testPropertyNamed "Basic" "basicPacketFifoProp" basicPacketFifoProp
+    ]
+
+basicPacketFifoProp ::
+  H.Property
+basicPacketFifoProp = H.property $ do
+  alters <- H.forAll $ Gen.list (Range.linear 0 10) (Gen.maybe Gen.enumBounded)
+  (inPkts, expectedPkts) <- mapAndUnzipM (H.forAllWith pPrintPair . genPacket) alters
+  let outPkts = runPacketFifo inPkts
+  H.footnote $ pPrintPacketSets (zip inPkts expectedPkts) outPkts ""
+  H.assert (outPkts == expectedPkts)
  where
-  streamIn =
-    C.fromList $ (map (Just . (True,)) $ init inPkt) ++
-    [Just (False, last inPkt)] ++ L.repeat Nothing
+  pPrintPair (inp, ex) =
+    ("Input packet:\n" ++) . pPrintPacket inp . ("\nExpected packet:\n" ++) $
+    pPrintPacket ex "\n"
 
-  (inReady, streamOut) = responderStream' C.systemClockGen E.noReset C.enableGen streamIn (pure True)
-  inReady1 = C.sample inReady
-  streamOut1 = C.sample streamOut
-
---   42 in -> 45 uit
+runPacketFifo ::
+  [[C.Unsigned 8]] ->
+  [[C.Unsigned 8]]
+runPacketFifo inPkts = outPkts
+ where
+  (outPkts, streamIn) = go inPkts streamOut
+  streamOut =
+    C.sample $ snd $
+    responderStream' C.systemClockGen E.noReset C.enableGen
+      (C.fromList streamIn) (pure True)
+  go [] _ = ([], [])
+  go (inPkt:inPkts0) streamOut0 = (outPkt:outPkts0, streamIn0 ++ streamIn1)
+   where
+    (outPkts0, streamIn1) = go inPkts0 streamOut2
+    streamIn0 =
+      (map (Just . (True,)) $ init inPkt) ++
+      [Just (False, last inPkt)] ++ L.replicate 3 Nothing ++
+      map (const Nothing) outPkt
+    (streamOut1, streamOut2) = span isJust $ drop (length inPkt + 3) streamOut0
+    outPkt = map (snd . fromJust) streamOut1
 
 data AlterPacket
   = AlterMac
@@ -53,7 +76,7 @@ data AlterPacket
     -- ^ Alter the level 3 protocol
   | AlterIpType
     -- ^ Alter the destination IP address or the ICMP type
-  deriving (Eq, Enum, Show)
+  deriving (Eq, Enum, Bounded, Show)
 
 genPacket ::
   H.MonadGen m =>
@@ -110,6 +133,7 @@ genPacket alter = do
       , ipType1 == ipType
       = reply1
       | otherwise = []
+
   pure (request1, reply2)
  where
   destMac = [ 0x52, 0x54, 0x00, 0xeb, 0x9b, 0xd0 ]
@@ -144,15 +168,20 @@ u16toU8s n = [ C.resize (n `C.shiftR` 8), C.resize n ]
 
 pPrintPacket ::
   [C.Unsigned 8] ->
-  String
-pPrintPacket packet =
-  ("Src MAC: " ++) . showHexList srcMac .
-  ("\nDst MAC: " ++) . showHexList dstMac . ("\nEtherType: " ++) .
-  showHexList etherType .
-  ("\nIP ver/len: " ++) . showHex8 verLen . ("\nL3 proto: " ++) . showHex8 l3Proto .
-  ("\nSrc IP: " ++) . showHexList srcIp .
-  ("\nDst IP: " ++) . showHexList destIp . ("\nICMP Type: " ++) . showHex8 icmpType .
-  ("\nPayload length: " ++) . shows payLen . ("\nComputed checksum: " ++) . showHex16 checksum . ("\nHex dump:\n" ++) $ showDump packet ""
+  ShowS
+pPrintPacket [] = ("No packet\n" ++)
+pPrintPacket packet
+  | length packet < 42
+  = ("Runt packet\nDump:\n" ++) . showDump packet . ('\n':)
+  | otherwise
+  = ("Src MAC: " ++) . showHexList srcMac . ("\nDst MAC: " ++) .
+    showHexList dstMac . ("\nEtherType: " ++) . showHexList etherType .
+    ("\nIP ver/len: " ++) . showHex8 verLen . ("\nL3 proto: " ++) .
+    showHex8 l3Proto . ("\nSrc IP: " ++) . showHexList srcIp .
+    ("\nDst IP: " ++) . showHexList destIp . ("\nICMP Type: " ++) .
+    showHex8 icmpType . ("\nPayload length: " ++) . shows payLen .
+    ("\nComputed checksum: " ++) . showHex16 checksum . ("\nHex dump:\n" ++) .
+    showDump packet . ('\n':)
  where
   (dstMac, packet1) = splitAt 6 packet
   (srcMac, packet2) = splitAt 6 packet1
@@ -182,3 +211,37 @@ pPrintPacket packet =
    where
     parts [] = []
     parts ns1 = let (ns2, ns3) = splitAt 8 ns1 in ns2:parts ns3
+
+
+pPrintPackets ::
+  [[C.Unsigned 8]] ->
+  ShowS
+pPrintPackets = go (0 :: Int)
+ where
+  go _ [] = id
+  go n (pkt:pkts) =
+    ("Packet " ++) . shows n . (":\n" ++) . pPrintPacket pkt . ('\n':) .
+    go (n+1) pkts
+
+pPrintPacketSets ::
+  [ ( [C.Unsigned 8]
+    , [C.Unsigned 8]
+    )] ->
+  [[C.Unsigned 8]] ->
+  ShowS
+pPrintPacketSets inpExps outs = go (0 :: Int) inpExps (map Just outs)
+ where
+  go _ [] [] = id
+  go _ [] (Nothing:_) = id
+  go n [] ((Just out):outs0) =
+    fmt "Extraneous output packet" n out . go (n+1) [] outs0
+  go n inpExps0@(_:_) [] = go n inpExps0 (replicate (length inpExps0) Nothing)
+  go n ((inp, ex):inpExps0) (out:outs0) =
+    fmt "Input packet" n inp . fmt "Expected packet" n ex . fmtOut out .
+    go (n+1) inpExps0 outs0
+   where
+    fmtOut Nothing = ("Missing output packet\n" ++)
+    fmtOut (Just pkt) = fmt "Output packet" n pkt
+
+  fmt hdr n pkt =
+    ((hdr ++ " ") ++) . shows n . (":\n" ++) . pPrintPacket pkt . ('\n':)
