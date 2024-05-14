@@ -1,6 +1,10 @@
 module IcmpEcho where
 
-import Clash.Prelude
+import Clash.Prelude hiding (someNatVal)
+import Data.Proxy (Proxy(..))
+import GHC.TypeNats (someNatVal)
+
+import qualified Data.List as L
 
 {-
  - One's complement addition.
@@ -20,6 +24,23 @@ f ::
 f = decodeGray
 {-# ANN f (defSyn "f") #-}
 
+g ::
+  forall n .
+  SNat n ->
+  Bool
+g SNat =
+  let
+    is = [minBound :: Unsigned (n+1) .. maxBound]
+  in
+    is == L.map (decodeGray . encodeGray) is
+
+h ::
+  Natural ->
+  Bool
+h n =
+  case someNatVal n of
+    SomeNat (Proxy @n) -> g (SNat @n)
+
 encodeGray ::
   forall n .
   KnownNat n =>
@@ -32,14 +53,17 @@ decodeGray ::
   KnownNat n =>
   Unsigned (n+1) ->
   Unsigned (n+1)
-decodeGray = go
+decodeGray = unpack . go . pack
  where
   go ::
     forall m .
     KnownNat m =>
-    Unsigned (m+1) ->
-    Unsigned (m+1)
+    BitVector (m+1) ->
+    BitVector (m+1)
   go m =
     case compareSNat (SNat @m) d0 of
-      SNatLE -> m
-      SNatGT -> m `xor` (extend $ go @(m-1) $ truncateB $ m `shiftR` 1)
+      SNatLE ->
+        m
+      SNatGT ->
+        let (mhead, mtail) = split @_ @1 m
+        in mhead ++# (mtail `xor` go @(m-1) (truncateB $ m `shiftR` 1))
