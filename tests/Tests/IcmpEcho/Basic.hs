@@ -2,11 +2,14 @@
 
 module Tests.IcmpEcho.Basic where
 
-import Control.Monad.Extra (mapAndUnzipM, replicateM)
+import Control.Monad
 import Data.Bits (complement)
 import Data.List (foldl', intersperse)
 import Data.Maybe (isJust, fromJust)
+import Data.Proxy (Proxy(..))
+import GHC.TypeNats (SomeNat(..), someNatVal, type (+))
 import Numeric (showHex)
+import Numeric.Natural (Natural)
 import Prelude
 
 import Clash.Hedgehog.Sized.Index
@@ -26,10 +29,17 @@ import qualified Hedgehog as H
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
 
+import qualified Test.Tasty.HUnit as U
+
 tests :: TestTree
 tests =
-  testGroup "PacketFifo"
-    [ testPropertyNamed "Basic" "basicPacketFifoProp" basicPacketFifoProp
+  testGroup "IcmpEcho"
+    [ testGroup "PacketFifo"
+      [ testPropertyNamed "Basic" "basicPacketFifoProp" basicPacketFifoProp
+      ]
+    , testGroup "IcmpEcho"
+      [ U.testCase "Gray coding identity up to 17 bits" $ assertGrayIdentity 17
+      ]
     ]
 
 basicPacketFifoProp ::
@@ -44,6 +54,17 @@ basicPacketFifoProp = H.property $ do
   pPrintPair (inp, ex) =
     ("Input packet:\n" ++) . pPrintPacket inp . ("\nExpected packet:\n" ++) $
     pPrintPacket ex "\n"
+
+assertGrayIdentity ::
+  Natural ->
+  U.Assertion
+assertGrayIdentity n = forM_ [1 .. n] (\m -> U.assertBool (show m) $ idFor m)
+ where
+  idFor m =
+    case someNatVal (m-1) of
+      SomeNat (Proxy @j) ->
+        let is = [0 :: C.Unsigned (j+1) .. maxBound]
+        in L.map (decodeGray . encodeGray) is == is
 
 runPacketFifo ::
   [[C.Unsigned 8]] ->
